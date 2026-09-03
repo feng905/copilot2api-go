@@ -171,16 +171,10 @@ func proxyCompletions(c *gin.Context) {
 			return
 		}
 
-		sdkClient := instance.GetSDKClient(resolved.AccountID)
-		if sdkClient == nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "SDK client not ready"})
-			return
-		}
-
 		// Record the request.
 		instance.RecordRequest(resolved.AccountID, false, false)
 
-		resp, proxyErr := instance.DoCompletionsProxy(c, resolved.State, sdkClient, bodyBytes)
+		resp, proxyErr := instance.DoCompletionsProxy(c, resolved.State, bodyBytes)
 		if proxyErr != nil {
 			if resp != nil {
 				_ = resp.Body.Close()
@@ -298,15 +292,9 @@ func proxyMessages(c *gin.Context) {
 			return
 		}
 
-		sdkClient := instance.GetSDKClient(resolved.AccountID)
-		if sdkClient == nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "SDK client not ready"})
-			return
-		}
-
 		instance.RecordRequest(resolved.AccountID, false, false)
 
-		resp, proxyErr := instance.DoMessagesProxy(c, resolved.State, sdkClient, bodyBytes)
+		resp, direct, proxyErr := instance.DoMessagesProxy(c, resolved.State, bodyBytes)
 		if proxyErr != nil {
 			if resp != nil {
 				_ = resp.Body.Close()
@@ -330,7 +318,13 @@ func proxyMessages(c *gin.Context) {
 			continue
 		}
 
-		instance.ForwardMessagesResponse(c, resp, bodyBytes)
+		if direct {
+			// Response is already in Anthropic format — forward as-is.
+			instance.ForwardCompletionsResponse(c, resp)
+		} else {
+			// Response is in OpenAI format — translate back to Anthropic.
+			instance.ForwardMessagesResponse(c, resp, bodyBytes)
+		}
 		return
 	}
 }
@@ -369,7 +363,7 @@ func proxyResponses(c *gin.Context) {
 
 		instance.RecordRequest(resolved.AccountID, false, false)
 
-		resp, proxyErr := instance.DoResponsesProxy(resolved.State, bodyBytes)
+		resp, proxyErr := instance.DoResponsesProxy(c.Request.Context(), resolved.State, bodyBytes)
 		if proxyErr != nil {
 			if resp != nil {
 				_ = resp.Body.Close()

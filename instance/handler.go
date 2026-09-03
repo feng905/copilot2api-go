@@ -15,13 +15,15 @@ import (
 	"copilot-go/store"
 
 	"github.com/gin-gonic/gin"
-	sdk "github.com/github/copilot-sdk/go"
 )
 
-// DoCompletionsProxy performs the upstream request for completions via the official SDK.
+// DoCompletionsProxy performs the upstream request for completions via the
+// native Copilot REST API. The SDK client is no longer used here; the request
+// body is proxied through verbatim (or translated to /responses when needed),
+// so the caller's system prompt and messages are never modified.
 // The caller is responsible for closing resp.Body.
-func DoCompletionsProxy(c *gin.Context, _ *config.State, sdkClient *sdk.Client, bodyBytes []byte) (*http.Response, error) {
-	return SDKDoCompletions(c.Request.Context(), sdkClient, bodyBytes)
+func DoCompletionsProxy(c *gin.Context, state *config.State, bodyBytes []byte) (*http.Response, error) {
+	return RestDoCompletions(c.Request.Context(), state, bodyBytes)
 }
 
 // ForwardCompletionsResponse writes the upstream response to the client.
@@ -72,10 +74,7 @@ func ForwardCompletionsResponse(c *gin.Context, resp *http.Response) {
 // contains entries that cannot actually be used through this proxy.
 func ModelsHandler(c *gin.Context, state *config.State) {
 	state.RLock()
-	models := state.SDKModels
-	if models == nil {
-		models = state.Models
-	}
+	models := state.Models
 	state.RUnlock()
 
 	if models == nil {
@@ -92,14 +91,15 @@ func ModelsHandler(c *gin.Context, state *config.State) {
 	}
 	for i, m := range models.Data {
 		mapped.Data[i] = config.ModelEntry{
-			ID:           store.ToDisplayID(m.ID),
-			Object:       m.Object,
-			Created:      m.Created,
-			OwnedBy:      m.OwnedBy,
-			Name:         m.Name,
-			Version:      m.Version,
-			Vendor:       m.Vendor,
-			Capabilities: m.Capabilities,
+			ID:                store.ToDisplayID(m.ID),
+			Object:            m.Object,
+			Created:           m.Created,
+			OwnedBy:           m.OwnedBy,
+			Name:              m.Name,
+			Version:           m.Version,
+			Vendor:            m.Vendor,
+			Capabilities:      m.Capabilities,
+			SupportedEndpoints: m.SupportedEndpoints,
 		}
 	}
 
@@ -131,30 +131,55 @@ func ForwardEmbeddingsResponse(c *gin.Context, resp *http.Response) {
 	c.Data(resp.StatusCode, "application/json", body)
 }
 
-// DoMessagesProxy performs the upstream request for Anthropic messages via the official SDK.
-// Returns the raw response. bodyBytes is the original Anthropic payload.
-func DoMessagesProxy(c *gin.Context, state *config.State, sdkClient *sdk.Client, bodyBytes []byte) (*http.Response, error) {
+// DoMessagesProxy performs the upstream request for Anthropic messages.
+// When the model natively supports /v1/messages, the Anthropic payload is
+// proxied directly (no format translation); otherwise it is translated to
+// OpenAI format and routed through /chat/completions.
+// The returned bool is true when the response is already in Anthropic format
+// (direct proxy) and false when it is in OpenAI format (needs translation).
+func DoMessagesProxy(c *gin.Context, state *config.State, bodyBytes []byte) (*http.Response, bool, error) {
 	var anthropicPayload anthropic.AnthropicMessagesPayload
 	if err := json.Unmarshal(bodyBytes, &anthropicPayload); err != nil {
-		return nil, fmt.Errorf("invalid request: %v", err)
+		return nil, false, fmt.Errorf("invalid request: %v", err)
 	}
 
-	// Auto-fill max_tokens from model capabilities if not provided
+	copilotModelID := anthropic.NormalizeAnthropicModel(store.ToCopilotID(anthropicPayload.Model))
+
+	// Auto-fill max_tokens from model capabilities if not provided.
 	if anthropicPayload.MaxTokens == 0 {
-		copilotModelID := anthropic.NormalizeAnthropicModel(store.ToCopilotID(anthropicPayload.Model))
 		if limit := lookupMaxOutputTokens(state, copilotModelID); limit > 0 {
 			anthropicPayload.MaxTokens = limit
 		}
 	}
 
-	openaiPayload := anthropic.TranslateToOpenAI(anthropicPayload)
-
-	openaiBytes, err := json.Marshal(openaiPayload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %v", err)
+	// Prefer /v1/messages when the model supports it — proxy the Anthropic
+	// payload directly so the request body is never modified.
+	if supportsEndpoint(state, copilotModelID, "/v1/messages") {
+		anthropicPayload.Model = copilotModelID
+		directBytes, err := json.Marshal(anthropicPayload)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to marshal request: %v", err)
+		}
+		// Forward Anthropic-specific headers the client may have sent.
+		extraHeaders := make(http.Header)
+		if v := c.GetHeader("anthropic-version"); v != "" {
+			extraHeaders.Set("anthropic-version", v)
+		}
+		if v := c.GetHeader("anthropic-beta"); v != "" {
+			extraHeaders.Set("anthropic-beta", v)
+		}
+		resp, err := ProxyRestRequest(c.Request.Context(), state, "POST", "/v1/messages", directBytes, extraHeaders)
+		return resp, true, err
 	}
 
-	return SDKDoCompletions(c.Request.Context(), sdkClient, openaiBytes)
+	// Fallback: translate Anthropic → OpenAI and route through /chat/completions.
+	openaiPayload := anthropic.TranslateToOpenAI(anthropicPayload)
+	openaiBytes, err := json.Marshal(openaiPayload)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to marshal request: %v", err)
+	}
+	resp, err := RestDoCompletions(c.Request.Context(), state, openaiBytes)
+	return resp, false, err
 }
 
 // ForwardMessagesResponse writes the upstream response to the client in Anthropic format.

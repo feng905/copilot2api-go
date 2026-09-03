@@ -2,6 +2,7 @@ package instance
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -9,26 +10,17 @@ import (
 	"strings"
 
 	"copilot-go/config"
-	"copilot-go/store"
 
 	"github.com/gin-gonic/gin"
 )
 
-// DoResponsesProxy forwards requests directly to GitHub Copilot /responses endpoint.
-func DoResponsesProxy(state *config.State, bodyBytes []byte) (*http.Response, error) {
-	// Convert model ID
-	var payload map[string]interface{}
-	if err := json.Unmarshal(bodyBytes, &payload); err == nil {
-		if model, ok := payload["model"].(string); ok {
-			payload["model"] = store.ToCopilotID(model)
-			bodyBytes, _ = json.Marshal(payload)
-		}
-	}
-
-	extraHeaders := make(http.Header)
-	extraHeaders.Set("X-Initiator", "user")
-
-	return ProxyRequestWithBytes(state, "POST", "/responses", bodyBytes, extraHeaders, false)
+// DoResponsesProxy forwards /v1/responses requests through the unified router.
+// It prefers the /responses endpoint when the model supports it, and falls back
+// to /chat/completions (with translation back to Responses format) when the
+// model is chat-only. This mirrors the policy used for /v1/chat/completions:
+// the interface the USER called wins, translation only happens when needed.
+func DoResponsesProxy(ctx context.Context, state *config.State, bodyBytes []byte) (*http.Response, error) {
+	return routeCompletion(ctx, state, "responses", bodyBytes)
 }
 
 // ForwardResponsesResponse forwards the upstream response directly to client.

@@ -3,6 +3,7 @@ package instance
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,14 +17,11 @@ import (
 	"copilot-go/config"
 	vsutil "copilot-go/copilot"
 	"copilot-go/store"
-
-	sdk "github.com/github/copilot-sdk/go"
 )
 
 type ProxyInstance struct {
 	Account   store.Account
 	State     *config.State
-	SDKClient *sdk.Client
 	Status    string // "running", "stopped", "error"
 	Error     string
 	stopChan  chan struct{}
@@ -74,29 +72,10 @@ func StartInstance(account store.Account) error {
 		log.Printf("Warning: failed to fetch models for account %s: %v", account.Name, err)
 	}
 
-	// Start official Copilot CLI SDK client
-	sdkClient := sdk.NewClient(&sdk.ClientOptions{
-		GitHubToken:     account.GithubToken,
-		UseLoggedInUser: sdk.Bool(false),
-	})
-	if err := sdkClient.Start(context.Background()); err != nil {
-		return fmt.Errorf("SDK client failed to start for %s: %w", account.Name, err)
-	}
-
-	// Cache the models the SDK actually accepts; /v1/models serves these.
-	{
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if err := fetchSDKModels(ctx, sdkClient, state); err != nil {
-			log.Printf("Warning: failed to fetch SDK models for account %s: %v", account.Name, err)
-		}
-		cancel()
-	}
-
 	stopChan := make(chan struct{})
 	inst := &ProxyInstance{
 		Account:   account,
 		State:     state,
-		SDKClient: sdkClient,
 		Status:    "running",
 		stopChan:  stopChan,
 	}
@@ -122,22 +101,9 @@ func StopInstance(accountID string) {
 	if inst.Status == "running" {
 		close(inst.stopChan)
 	}
-	if inst.SDKClient != nil {
-		_ = inst.SDKClient.Stop()
-	}
 	inst.Status = "stopped"
 	mu.Unlock()
 	log.Printf("Instance stopped for account: %s", inst.Account.Name)
-}
-
-// GetSDKClient returns the SDK client for the given account, or nil if not running.
-func GetSDKClient(accountID string) *sdk.Client {
-	mu.RLock()
-	defer mu.RUnlock()
-	if inst, ok := instances[accountID]; ok {
-		return inst.SDKClient
-	}
-	return nil
 }
 
 func GetInstanceStatus(accountID string) string {
@@ -179,10 +145,7 @@ func GetAllCachedModels() []config.ModelEntry {
 			continue
 		}
 		inst.State.RLock()
-		models := inst.State.SDKModels
-		if models == nil {
-			models = inst.State.Models
-		}
+		models := inst.State.Models
 		inst.State.RUnlock()
 		if models == nil {
 			continue
@@ -306,8 +269,14 @@ func refreshCopilotToken(state *config.State) error {
 	state.Lock()
 	state.CopilotToken = tokenResp.Token
 	state.TokenExpiresAt = tokenResp.ExpiresAt
+	if tokenResp.Endpoints.API != "" {
+		state.RestEndpoint = tokenResp.Endpoints.API
+	}
 	state.Unlock()
 
+	if tokenResp.Endpoints.API != "" {
+		log.Printf("Copilot REST endpoint (from token): %s", tokenResp.Endpoints.API)
+	}
 	if tokenResp.ExpiresAt > 0 {
 		expiresIn := time.Until(time.Unix(tokenResp.ExpiresAt, 0))
 		log.Printf("Copilot token refreshed, expires in %v", expiresIn.Round(time.Second))
@@ -336,15 +305,11 @@ func refreshCopilotTokenWithRetry(state *config.State, maxRetries int) error {
 }
 
 func fetchModels(state *config.State) error {
-	state.RLock()
-	baseURL := config.CopilotBaseURL(state.AccountType)
-	state.RUnlock()
-
-	req, err := http.NewRequest("GET", baseURL+"/models", nil)
+	req, err := http.NewRequest("GET", config.CopilotRestBaseURL(state)+"/models", nil)
 	if err != nil {
 		return err
 	}
-	for k, v := range config.CopilotHeaders(state, false) {
+	for k, v := range config.CopilotRestHeaders(state) {
 		req.Header[k] = v
 	}
 
@@ -382,48 +347,6 @@ func fetchModels(state *config.State) error {
 	return nil
 }
 
-// fetchSDKModels asks the Copilot CLI SDK which models its sessions accept and
-// caches them on the state. The REST /models list (fetchModels) contains models
-// that session.create rejects, so listings must come from here (issue #14).
-func fetchSDKModels(ctx context.Context, sdkClient *sdk.Client, state *config.State) error {
-	models, err := sdkClient.ListModels(ctx)
-	if err != nil {
-		return err
-	}
-	resp := sdkModelsToResponse(models)
-
-	state.Lock()
-	state.SDKModels = resp
-	state.Unlock()
-	return nil
-}
-
-// sdkModelsToResponse converts SDK model infos to the OpenAI-style model list
-// served by /v1/models.
-func sdkModelsToResponse(models []sdk.ModelInfo) *config.ModelsResponse {
-	resp := &config.ModelsResponse{Object: "list", Data: make([]config.ModelEntry, 0, len(models))}
-	for _, m := range models {
-		entry := config.ModelEntry{
-			ID:      m.ID,
-			Object:  "model",
-			OwnedBy: "github-copilot",
-			Name:    m.Name,
-		}
-		limits := config.ModelLimits{}
-		if m.Capabilities.Limits.MaxPromptTokens != nil {
-			limits.MaxPromptTokens = *m.Capabilities.Limits.MaxPromptTokens
-		}
-		if m.Capabilities.Limits.MaxContextWindowTokens != nil {
-			limits.MaxContextWindow = *m.Capabilities.Limits.MaxContextWindowTokens
-		}
-		if limits != (config.ModelLimits{}) {
-			entry.Capabilities = &config.ModelCapabilities{Type: "chat", Limits: limits}
-		}
-		resp.Data = append(resp.Data, entry)
-	}
-	return resp
-}
-
 var (
 	clientMu            sync.RWMutex
 	streamingHTTPClient *http.Client
@@ -439,6 +362,14 @@ func buildTransport(streaming bool, proxyRawURL string) *http.Transport {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		// Force HTTP/1.1: the Copilot API hosts (api.githubcopilot.com and
+		// api.<account>.githubcopilot.com) share the same edge IPs, and HTTP/2
+		// connection coalescing makes the client reuse a connection established
+		// for one host when calling another, causing "421 Misdirected Request".
+		// HTTP/1.1 keeps per-host connection pools and sends an explicit Host
+		// header, which avoids the misdirection.
+		ForceAttemptHTTP2: false,
+		TLSClientConfig:   &tls.Config{NextProtos: []string{"http/1.1"}},
 	}
 	if streaming {
 		t.MaxIdleConns = 100
