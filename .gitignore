@@ -2,3 +2,8 @@
 zcopilot_*
 .gocache/
 .DS_Store
+
+/web/node_modules/
+
+.workbuddy/
+.claude/
