@@ -66,6 +66,13 @@ func routeCompletion(ctx context.Context, state *config.State, callerInterface s
 
 	targetEP, translate := chooseEndpoint(state, model, callerInterface)
 	if !translate {
+		// The GitHub /responses endpoint rejects OpenAI-spec "easy" input items
+		// (string content) with 400 "Invalid type for 'input'". Upgrade them to
+		// the strict typed-parts shape before forwarding, whatever built the
+		// body (us, new-api, or any spec-compliant client).
+		if targetEP == "/responses" {
+			bodyBytes = normalizeResponsesInput(bodyBytes)
+		}
 		resp, err := ProxyRestRequest(ctx, state, "POST", targetEP, bodyBytes, nil)
 		if err != nil {
 			return nil, err
@@ -180,6 +187,173 @@ func sanitizeResponsesInputMessage(msg map[string]interface{}) map[string]interf
 	return msg
 }
 
+// normalizeResponsesInput upgrades OpenAI-spec "easy" request fields to the
+// strict shape the GitHub /responses endpoint requires:
+//
+//   - input items: the official API accepts {"role":"user","content":"hi"}
+//     (EasyInputMessage) and chat-style content part types, but GitHub rejects
+//     string content with 400 "Invalid type for 'input': expected a string, but
+//     got an object instead". Items are converted to the typed-parts form
+//     verified against the real upstream:
+//
+//     {"role":"user","content":"hi"}
+//     -> {"role":"user","content":[{"type":"input_text","text":"hi"}]}
+//     {"role":"assistant","content":"hi"}
+//     -> {"type":"message","role":"assistant","status":"completed",
+//     "content":[{"type":"output_text","text":"hi"}]}
+//
+//   - tools / tool_choice: Chat nests function definitions under "function";
+//     /responses requires them flat (see flattenChatFunctionTool), otherwise
+//     upstream answers 400 "Missing required parameter: 'tools[0].name'".
+//
+// Bodies that need no change are returned unchanged (byte-for-byte).
+func normalizeResponsesInput(bodyBytes []byte) []byte {
+	var body map[string]interface{}
+	dec := json.NewDecoder(bytes.NewReader(bodyBytes))
+	dec.UseNumber() // keep unrelated number literals byte-stable
+	if err := dec.Decode(&body); err != nil {
+		return bodyBytes
+	}
+	changed := false
+	if input, ok := body["input"].([]interface{}); ok {
+		for _, raw := range input {
+			item, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if normalizeResponsesInputItem(item) {
+				changed = true
+			}
+		}
+	}
+	if tools, ok := body["tools"].([]interface{}); ok {
+		for _, raw := range tools {
+			tool, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if flattenChatFunctionTool(tool) {
+				changed = true
+			}
+		}
+	}
+	if flattenChatToolChoice(body["tool_choice"]) {
+		changed = true
+	}
+	if !changed {
+		return bodyBytes
+	}
+	out, err := json.Marshal(body)
+	if err != nil {
+		return bodyBytes
+	}
+	return out
+}
+
+// flattenChatFunctionTool converts a Chat-style function tool to the flat
+// /responses shape in place and reports whether it changed. Chat nests the
+// definition under "function" while /responses requires it at the top level —
+// forwarded verbatim, upstream rejects the request with 400 "Missing required
+// parameter: 'tools[N].name'" (the WorkBuddy failure):
+//
+//	{"type":"function","function":{"name":"f","description":...,"parameters":...}}
+//	  -> {"type":"function","name":"f","description":...,"parameters":...}
+//
+// Tools without a "function" object (already flat, or built-in types like
+// web_search) are left alone. Existing top-level fields win over nested ones.
+func flattenChatFunctionTool(tool map[string]interface{}) bool {
+	fn, ok := tool["function"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for k, v := range fn {
+		if _, exists := tool[k]; !exists {
+			tool[k] = v
+		}
+	}
+	delete(tool, "function")
+	return true
+}
+
+// flattenChatToolChoice converts a Chat-style forced tool choice to the flat
+// /responses shape: {"type":"function","function":{"name":"f"}} ->
+// {"type":"function","name":"f"}. String choices ("auto", "none", ...) and
+// already-flat objects are left alone.
+func flattenChatToolChoice(raw interface{}) bool {
+	tc, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	fn, ok := tc["function"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if name, ok := fn["name"].(string); ok && name != "" {
+		if cur, _ := tc["name"].(string); cur != name {
+			tc["name"] = name
+		}
+	}
+	delete(tc, "function")
+	return true
+}
+
+// normalizeResponsesInputItem upgrades one input item in place and reports
+// whether it changed. Items carrying a non-message type (function_call,
+// function_call_output, reasoning, ...) are left alone.
+func normalizeResponsesInputItem(item map[string]interface{}) bool {
+	if t, _ := item["type"].(string); t != "" && t != "message" {
+		return false
+	}
+	role, _ := item["role"].(string)
+	textType := "input_text"
+	if role == "assistant" {
+		textType = "output_text"
+	}
+
+	changed := false
+	switch content := item["content"].(type) {
+	case string:
+		item["content"] = []interface{}{map[string]interface{}{"type": textType, "text": content}}
+		changed = true
+	case []interface{}:
+		for _, raw := range content {
+			part, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			// Chat-style parts use {"type":"text"}; /responses wants
+			// input_text / output_text.
+			if pt, _ := part["type"].(string); pt == "text" {
+				if _, has := part["text"]; has {
+					part["type"] = textType
+					changed = true
+				}
+			}
+			if _, has := part["reasoning_content"]; has {
+				delete(part, "reasoning_content")
+				changed = true
+			}
+		}
+	}
+
+	// Assistant message items round-trip with a type and status (the shape the
+	// upstream itself emits and demonstrably accepts as input).
+	if role == "assistant" && changed {
+		if t, _ := item["type"].(string); t == "" {
+			item["type"] = "message"
+		}
+		if s, _ := item["status"].(string); s == "" {
+			item["status"] = "completed"
+		}
+	}
+
+	if _, has := item["reasoning_content"]; has {
+		delete(item, "reasoning_content")
+		changed = true
+	}
+	return changed
+}
+
 // doResponsesTranslation sends a Chat request to the /responses endpoint and
 // converts the response back to Chat format (non-streaming), or wraps it as a
 // single SSE chunk when the caller asked for streaming. Used when the caller
@@ -202,7 +376,10 @@ func doResponsesTranslation(ctx context.Context, state *config.State, bodyBytes 
 			if !ok {
 				continue
 			}
-			if role, _ := msg["role"].(string); role == "system" {
+			// Chat's "developer" role is the system-role variant newer models
+			// use (WorkBuddy sends its system prompt this way); both map to
+			// /responses instructions.
+			if role, _ := msg["role"].(string); role == "system" || role == "developer" {
 				responses["instructions"] = msg["content"]
 				continue
 			}
@@ -224,15 +401,23 @@ func doResponsesTranslation(ctx context.Context, state *config.State, bodyBytes 
 	if err != nil {
 		return nil, err
 	}
+	// The messages were copied from the Chat request, so string contents must
+	// be upgraded to typed parts (same normalization as the verbatim path).
+	respBody = normalizeResponsesInput(respBody)
 
 	resp, err := ProxyRestRequest(ctx, state, "POST", "/responses", respBody, nil)
 	if err != nil {
 		return nil, err
 	}
+	// Forward upstream error responses untouched instead of converting them to
+	// errors: an error makes the pool handler treat every 4xx as an account
+	// failure, retry with the remaining accounts and finally answer 503 "no
+	// available accounts in pool" — masking the real upstream error (the
+	// WorkBuddy failure read exactly like that). Returning the response lets the
+	// handler's uniform policy apply: 429/5xx -> next account, everything else
+	// -> relayed verbatim to the client.
 	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		return nil, fmt.Errorf("upstream /responses returned %d: %s", resp.StatusCode, string(b))
+		return resp, nil
 	}
 
 	if !stream {
@@ -377,10 +562,11 @@ func doChatTranslation(ctx context.Context, state *config.State, bodyBytes []byt
 	if err != nil {
 		return nil, err
 	}
+	// Forward upstream error responses untouched — same rationale as
+	// doResponsesTranslation: request-body 4xx must reach the client verbatim
+	// instead of draining the account pool into a masked 503.
 	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		return nil, fmt.Errorf("upstream /chat/completions returned %d: %s", resp.StatusCode, string(b))
+		return resp, nil
 	}
 
 	if !stream {

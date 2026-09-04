@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"copilot-go/auth"
+	"copilot-go/buildinfo"
 	"copilot-go/config"
 	"copilot-go/instance"
 	"copilot-go/store"
@@ -67,6 +68,16 @@ func RegisterConsoleAPI(r *gin.Engine, proxyPort int) {
 
 	api.POST("/auth/setup", handleSetup)
 	api.POST("/auth/login", handleLogin)
+
+	// Build metadata for the console title version suffix. Public like /config:
+	// it must render on the setup/login screens, before authentication.
+	api.GET("/version", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"commit":    buildinfo.Commit,
+			"buildTime": buildinfo.BuildTime,
+			"version":   buildinfo.String(),
+		})
+	})
 
 	// Protected endpoints
 	protected := api.Group("")

@@ -81,6 +81,12 @@ export interface ConfigResponse {
   needsSetup: boolean
 }
 
+export interface VersionInfo {
+  commit: string
+  buildTime: string
+  version: string
+}
+
 export interface BatchUsageItem {
   accountId: string
   name: string
@@ -128,6 +134,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 export const api = {
   getConfig: () => request<ConfigResponse>("/config"),
+
+  getVersion: () => request<VersionInfo>("/version"),
 
   setup: (username: string, password: string) =>
     request<{ token: string }>("/auth/setup", {

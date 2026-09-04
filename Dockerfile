@@ -14,7 +14,11 @@ RUN go mod download
 COPY . .
 COPY --from=frontend /app/web/dist ./web/dist
 RUN go tool bundler
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o copilot-go .
+# Build metadata for the console version suffix (passed via --build-arg by the
+# makefile; .git is excluded from the build context so git is unavailable here).
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+RUN CGO_ENABLED=0 go build -ldflags="-s -w -X copilot-go/buildinfo.Commit=$COMMIT -X copilot-go/buildinfo.BuildTime=$BUILD_TIME" -o copilot-go .
 
 # Stage 3: Runtime
 FROM debian:bookworm-slim

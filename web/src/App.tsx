@@ -19,6 +19,35 @@ function LanguageSwitcher() {
   )
 }
 
+// Console title with the build version ("{short commit}-{build time}") as
+// small muted text after the title. Fetched once and cached across mounts;
+// hidden entirely when the API is unreachable or the build is unversioned.
+let versionPromise: Promise<string> | null = null
+
+function ConsoleTitle() {
+  const t = useT()
+  const [version, setVersion] = useState("")
+  useEffect(() => {
+    if (!versionPromise) {
+      versionPromise = api
+        .getVersion()
+        .then((v) => v.version)
+        .catch(() => "")
+    }
+    void versionPromise.then(setVersion)
+  }, [])
+  return (
+    <h1 style={{ fontSize: 22, fontWeight: 600 }}>
+      {t("consoleTitle")}
+      {version && (
+        <span style={{ fontSize: 12, fontWeight: 400, color: "var(--text-muted)", marginLeft: 10 }}>
+          {version}
+        </span>
+      )}
+    </h1>
+  )
+}
+
 function SetupForm({ onComplete }: { onComplete: () => void }) {
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
@@ -44,7 +73,7 @@ function SetupForm({ onComplete }: { onComplete: () => void }) {
   return (
     <div style={{ maxWidth: 400, margin: "120px auto", padding: "0 16px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 600 }}>{t("consoleTitle")}</h1>
+        <ConsoleTitle />
         <LanguageSwitcher />
       </div>
       <p style={{ color: "var(--text-muted)", fontSize: 14, marginBottom: 24 }}>{t("setupSubtitle")}</p>
@@ -81,7 +110,7 @@ function LoginForm({ onLogin }: { onLogin: () => void }) {
   return (
     <div style={{ maxWidth: 400, margin: "120px auto", padding: "0 16px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 600 }}>{t("consoleTitle")}</h1>
+        <ConsoleTitle />
         <LanguageSwitcher />
       </div>
       <p style={{ color: "var(--text-muted)", fontSize: 14, marginBottom: 24 }}>{t("loginSubtitle")}</p>
@@ -863,7 +892,7 @@ function Dashboard() {
     <div style={{ maxWidth: 960, margin: "0 auto", padding: "24px 16px" }}>
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
         <div>
-          <h1 style={{ fontSize: 22, fontWeight: 600 }}>{t("consoleTitle")}</h1>
+          <ConsoleTitle />
           <p style={{ color: "var(--text-muted)", fontSize: 14 }}>{t("dashboardSubtitle")}</p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
