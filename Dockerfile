@@ -18,7 +18,8 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o copilot-go .
 
 # Stage 3: Runtime
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
   && rm -rf /var/lib/apt/lists/*

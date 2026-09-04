@@ -1,6 +1,6 @@
 services:
   copilot-go:
-    image: ghcr.io/starrykira/copilot2api-go:latest
+    image: hub.metami.work/copilot-go/copilot-go:latest
     container_name: copilot-go
     restart: unless-stopped
     ports:
