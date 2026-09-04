@@ -6,5 +6,5 @@ zcopilot_*
 /web/node_modules/
 
 .workbuddy/
-.claude/
+.claude
 /copilot-go

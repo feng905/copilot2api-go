@@ -264,36 +264,42 @@ func translateResponsesToChat(resp *http.Response, model string) ([]byte, error)
 	// Account-level response encryption: GitHub returns encrypted_content
 	// instead of plaintext for some business/enterprise accounts. The
 	// decryption key is only available through the official Copilot CLI's
-	// session.create handshake, so such responses cannot be proxied verbatim.
-	if output, ok := r["output"].([]interface{}); ok && len(output) > 0 {
-		if m, ok := output[0].(map[string]interface{}); ok {
-			if _, encrypted := m["encrypted_content"]; encrypted {
-				return nil, fmt.Errorf("upstream response for model %q is encrypted (account-level response encryption); it cannot be proxied verbatim — use an account without response encryption, or the official Copilot CLI", model)
-			}
-		}
-	}
-
+	// session.create handshake, so encrypted items carry no readable text —
+	// but the response often ALSO carries a plaintext message item, so collect
+	// text from every output item and only fail when the whole response is
+	// encrypted (no plaintext output_text part anywhere).
 	var text strings.Builder
+	hasEncrypted := false
+	hasPlainText := false
 	if output, ok := r["output"].([]interface{}); ok {
 		for _, item := range output {
 			m, ok := item.(map[string]interface{})
 			if !ok {
 				continue
 			}
+			if _, encrypted := m["encrypted_content"]; encrypted {
+				hasEncrypted = true
+			}
 			if content, ok := m["content"].([]interface{}); ok {
 				for _, c := range content {
 					if cm, ok := c.(map[string]interface{}); ok {
 						if t, ok := cm["text"].(string); ok {
 							text.WriteString(t)
+							hasPlainText = true
 						}
 					}
 				}
 			}
 		}
 	}
+	if hasEncrypted && !hasPlainText {
+		return nil, fmt.Errorf("upstream response for model %q is fully encrypted (account-level response encryption); no plaintext output could be recovered — use an account without response encryption, or the official Copilot CLI", model)
+	}
 
 	id, _ := r["id"].(string)
-	model = r["model"].(string)
+	if m, ok := r["model"].(string); ok && m != "" {
+		model = m
+	}
 
 	chat := map[string]interface{}{
 		"id":      "chatcmpl-" + id,
@@ -511,11 +517,11 @@ func wrapChatAsResponsesSSE(resp *http.Response, model string) (*http.Response, 
 	id, _ := r["id"].(string)
 	// Emit one output_text delta with the full text, then a completed event.
 	delta := map[string]interface{}{
-		"type": "response.output_text.delta",
-		"item_id": "msg_0",
-		"output_index": 0,
+		"type":          "response.output_text.delta",
+		"item_id":       "msg_0",
+		"output_index":  0,
 		"content_index": 0,
-		"delta": text,
+		"delta":         text,
 	}
 	dBytes, _ := json.Marshal(delta)
 	sb.WriteString("data: " + string(dBytes) + "\n\n")
