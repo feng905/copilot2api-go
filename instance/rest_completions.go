@@ -206,6 +206,11 @@ func sanitizeResponsesInputMessage(msg map[string]interface{}) map[string]interf
 //     /responses requires them flat (see flattenChatFunctionTool), otherwise
 //     upstream answers 400 "Missing required parameter: 'tools[0].name'".
 //
+//   - store: upstream accepts "store": false but rejects "store": true with
+//     400 {"code":"unsupported_value","param":"store","message":"store is not
+//     supported"} (the racoder/VS Code failure). The proxy is stateless and
+//     never stores responses anyway, so true is coerced to false.
+//
 // Bodies that need no change are returned unchanged (byte-for-byte).
 func normalizeResponsesInput(bodyBytes []byte) []byte {
 	var body map[string]interface{}
@@ -238,6 +243,10 @@ func normalizeResponsesInput(bodyBytes []byte) []byte {
 		}
 	}
 	if flattenChatToolChoice(body["tool_choice"]) {
+		changed = true
+	}
+	if store, ok := body["store"].(bool); ok && store {
+		body["store"] = false
 		changed = true
 	}
 	if !changed {

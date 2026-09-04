@@ -55,6 +55,29 @@ func TestNormalizeResponsesInput_StringContentUpgraded(t *testing.T) {
 	}
 }
 
+// TestNormalizeResponsesInput_StoreCoerced reproduces the racoder (VS Code)
+// failure: the client sends "store": true and GitHub /responses rejects it with
+// 400 {"code":"unsupported_value","param":"store","message":"store is not
+// supported"} — while "store": false is accepted (verified against the real
+// upstream, see TestNormalizeResponsesInput_StrictBodyUnchanged). true must be
+// coerced to false, with every other field preserved.
+func TestNormalizeResponsesInput_StoreCoerced(t *testing.T) {
+	in := `{"model":"gpt-5.6-luna","stream":true,"store":true,` +
+		`"truncation":"disabled","include":["reasoning.encrypted_content"],` +
+		`"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
+	out := decodeJSON(t, string(normalizeResponsesInput([]byte(in))))
+
+	if out["store"] != false {
+		t.Fatalf("store = %v, want false", out["store"])
+	}
+	if out["truncation"] != "disabled" {
+		t.Fatalf("truncation = %v, want disabled", out["truncation"])
+	}
+	if parts, ok := out["include"].([]interface{}); !ok || len(parts) != 1 || parts[0] != "reasoning.encrypted_content" {
+		t.Fatalf("include = %v, want preserved", out["include"])
+	}
+}
+
 // TestNormalizeResponsesInput_StrictBodyUnchanged: a body already in the shape
 // the upstream demonstrably accepts (Cherry Studio's successful /v1/responses
 // request) must come back byte-for-byte identical.
