@@ -169,6 +169,28 @@ const en = {
   claudeCodePoolKey: "Pool Key",
   claudeCodeCustomModel: "Custom...",
   claudeCodeCustomModelPlaceholder: "Enter custom model name",
+
+  // Settings modal
+  settings: "Settings",
+  settingsTabHeaders: "Response Headers",
+  headerForwardingHint:
+    "Hop-by-hop headers (Connection, Transfer-Encoding, …), Content-Type, Content-Length and Set-Cookie are never forwarded.",
+  modePassthrough: "Passthrough",
+  modeWhitelist: "Whitelist",
+  modeBlacklist: "Blacklist",
+  modePassthroughDesc: "Forward all upstream response headers",
+  modeWhitelistDesc: "Forward only selected headers",
+  modeBlacklistDesc: "Forward all except selected headers",
+  selectedHeaders: "Forwarded headers",
+  excludedHeaders: "Excluded headers",
+  presetAnthropic: "Anthropic",
+  presetOpenAI: "OpenAI",
+  presetCommon: "Common",
+  addHeader: "Add",
+  addHeaderPlaceholder: "Header name, e.g. x-my-header",
+  headerAlreadyAdded: "Already in list",
+  headerNameInvalid: "Invalid header name",
+  loadingFailed: "Failed to load settings",
 } as const
 
 export type TranslationKey = keyof typeof en
@@ -339,6 +361,28 @@ const zh: Translations = {
   claudeCodePoolKey: "池密钥",
   claudeCodeCustomModel: "自定义...",
   claudeCodeCustomModelPlaceholder: "输入自定义模型名称",
+
+  // Settings modal
+  settings: "设置",
+  settingsTabHeaders: "响应头转发",
+  headerForwardingHint:
+    "逐跳头（Connection、Transfer-Encoding 等）、Content-Type、Content-Length 和 Set-Cookie 永远不会转发。",
+  modePassthrough: "完全透传",
+  modeWhitelist: "白名单",
+  modeBlacklist: "黑名单",
+  modePassthroughDesc: "转发所有上游响应头",
+  modeWhitelistDesc: "仅转发所选响应头",
+  modeBlacklistDesc: "转发除所选外的所有响应头",
+  selectedHeaders: "转发列表",
+  excludedHeaders: "排除列表",
+  presetAnthropic: "Anthropic",
+  presetOpenAI: "OpenAI",
+  presetCommon: "通用",
+  addHeader: "添加",
+  addHeaderPlaceholder: "头名称，例如 x-my-header",
+  headerAlreadyAdded: "已在列表中",
+  headerNameInvalid: "无效的头名称",
+  loadingFailed: "加载设置失败",
 } as const
 
 interface I18nContextValue {

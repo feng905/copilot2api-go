@@ -41,6 +41,8 @@ func ForwardResponsesResponse(c *gin.Context, resp *http.Response) {
 // forwardResponsesStream relays the upstream SSE stream to the client frame by
 // frame, normalizing ids on the way through (see responsesStreamNormalizer).
 func forwardResponsesStream(c *gin.Context, resp *http.Response) {
+	ApplyUpstreamResponseHeaders(c, resp.Header)
+
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -295,6 +297,8 @@ func jsonInt(v interface{}) (int, bool) {
 }
 
 func forwardResponsesNonStream(c *gin.Context, resp *http.Response) {
+	ApplyUpstreamResponseHeaders(c, resp.Header)
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})

@@ -31,6 +31,8 @@ func DoCompletionsProxy(c *gin.Context, state *config.State, bodyBytes []byte) (
 func ForwardCompletionsResponse(c *gin.Context, resp *http.Response) {
 	defer func() { _ = resp.Body.Close() }()
 
+	ApplyUpstreamResponseHeaders(c, resp.Header)
+
 	contentType := resp.Header.Get("Content-Type")
 	isStream := strings.Contains(contentType, "text/event-stream")
 
@@ -123,6 +125,8 @@ func DoEmbeddingsProxy(state *config.State, bodyBytes []byte) (*http.Response, e
 // ForwardEmbeddingsResponse writes the upstream embeddings response to the client.
 func ForwardEmbeddingsResponse(c *gin.Context, resp *http.Response) {
 	defer func() { _ = resp.Body.Close() }()
+
+	ApplyUpstreamResponseHeaders(c, resp.Header)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -239,6 +243,8 @@ func ForwardMessagesResponse(c *gin.Context, resp *http.Response, originalBody [
 }
 
 func handleAnthropicNonStream(c *gin.Context, resp *http.Response) {
+	ApplyUpstreamResponseHeaders(c, resp.Header)
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
@@ -261,6 +267,8 @@ func handleAnthropicNonStream(c *gin.Context, resp *http.Response) {
 }
 
 func handleAnthropicStream(c *gin.Context, resp *http.Response) {
+	ApplyUpstreamResponseHeaders(c, resp.Header)
+
 	// If upstream returned an error, translate it properly instead of trying to SSE-parse
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

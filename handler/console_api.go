@@ -122,6 +122,10 @@ func RegisterConsoleAPI(r *gin.Engine, proxyPort int) {
 	protected.GET("/proxy-config", handleGetProxyConfig)
 	protected.PUT("/proxy-config", handleUpdateProxyConfig)
 
+	// Response header forwarding settings
+	protected.GET("/settings/response-headers", handleGetResponseHeaderSettings)
+	protected.PUT("/settings/response-headers", handleUpdateResponseHeaderSettings)
+
 	// Proxy usage stats (from in-memory tracking)
 	protected.GET("/usage", handleGetProxyUsage)
 	protected.GET("/usage/:id", handleGetProxyAccountUsage)
@@ -657,6 +661,79 @@ func handleUpdateProxyConfig(c *gin.Context) {
 	config.SetProxyURL(cfg.ProxyURL)
 	instance.RebuildHTTPClients()
 	c.JSON(http.StatusOK, cfg)
+}
+
+// --- Response header forwarding settings handlers ---
+
+func handleGetResponseHeaderSettings(c *gin.Context) {
+	cfg, err := store.GetResponseHeaderConfig()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"mode":      cfg.Mode,
+		"whitelist": cfg.Whitelist,
+		"blacklist": cfg.Blacklist,
+		"presets":   store.ResponseHeaderPresets(),
+	})
+}
+
+func handleUpdateResponseHeaderSettings(c *gin.Context) {
+	var req struct {
+		Mode      string   `json:"mode"`
+		Whitelist []string `json:"whitelist"`
+		Blacklist []string `json:"blacklist"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+
+	switch req.Mode {
+	case store.HeaderModePassthrough, store.HeaderModeWhitelist, store.HeaderModeBlacklist:
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid mode"})
+		return
+	}
+
+	// Header-name syntax: reject empty names, whitespace, CRLF/colon injection
+	// (the store normalizer also drops invalid entries defensively, but the
+	// update path must reject rather than silently drop).
+	if err := validateHeaderNameList(req.Whitelist); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := validateHeaderNameList(req.Blacklist); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	cfg := store.NormalizeResponseHeaderConfig(store.ResponseHeaderConfig{
+		Mode:      req.Mode,
+		Whitelist: req.Whitelist,
+		Blacklist: req.Blacklist,
+	})
+	if err := store.UpdateResponseHeaderConfig(cfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, cfg)
+}
+
+// validateHeaderNameList enforces the per-entry rules: RFC 7230 token syntax,
+// 128-char name cap, 100 entries per list.
+func validateHeaderNameList(list []string) error {
+	if len(list) > 100 {
+		return fmt.Errorf("too many headers (max 100)")
+	}
+	for _, name := range list {
+		name = strings.TrimSpace(name)
+		if name == "" || len(name) > 128 || !store.IsHeaderTokenName(name) {
+			return fmt.Errorf("invalid header name: %q", name)
+		}
+	}
+	return nil
 }
 
 // --- Proxy usage handlers ---

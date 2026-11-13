@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 
-import { api, getSessionToken, setSessionToken, type Account, type BatchUsageItem, type CopilotModel, type ModelMapping, type PoolConfig, type ProxySettings, type ProxyUsageSnapshot } from "./api"
+import { api, getSessionToken, setSessionToken, type Account, type BatchUsageItem, type CopilotModel, type HeaderForwardMode, type HeaderPreset, type ModelMapping, type PoolConfig, type ProxySettings, type ProxyUsageSnapshot, type ResponseHeaderSettings } from "./api"
 import { AccountCard } from "./components/AccountCard"
 import { AddAccountForm } from "./components/AddAccountForm"
 import { useLocale, useT } from "./i18n"
@@ -217,6 +217,198 @@ function ProxySettingsPanel({ settings, onChange }: { settings: ProxySettings; o
         </button>
       </div>
     </div>
+  )
+}
+
+// SettingsModal is the personalization surface opened from the header gear
+// button. The modal owns the shared chrome (title + category tab bar); each
+// category renders its own panel component with its own data and save button.
+// Adding a category = one entry in `tabs` + one panel component.
+type SettingsTab = "headers"
+
+function SettingsModal({ onClose }: { onClose: () => void }) {
+  const [tab, setTab] = useState<SettingsTab>("headers")
+  const t = useT()
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose()
+    }
+    window.addEventListener("keydown", handler)
+    return () => window.removeEventListener("keydown", handler)
+  }, [onClose])
+
+  const tabs: { key: SettingsTab; label: string }[] = [
+    { key: "headers", label: t("settingsTabHeaders") },
+  ]
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div className="modal-title">{t("settings")}</div>
+          <button onClick={onClose} aria-label="close" style={{ padding: "2px 8px" }}>✕</button>
+        </div>
+
+        <div className="settings-tabs">
+          {tabs.map((tb) => (
+            <button key={tb.key} className={`settings-tab${tab === tb.key ? " active" : ""}`} onClick={() => setTab(tb.key)}>
+              {tb.label}
+            </button>
+          ))}
+        </div>
+
+        {tab === "headers" && <HeaderForwardingSettings onClose={onClose} />}
+      </div>
+    </div>
+  )
+}
+
+// HeaderForwardingSettings is the response-header forwarding tab. It owns its
+// data: config and presets are re-fetched on every mount, edits stay local
+// until Save.
+function HeaderForwardingSettings({ onClose }: { onClose: () => void }) {
+  const [cfg, setCfg] = useState<ResponseHeaderSettings | null>(null)
+  const [presets, setPresets] = useState<HeaderPreset[]>([])
+  const [input, setInput] = useState("")
+  const [inputError, setInputError] = useState("")
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState("")
+  const t = useT()
+
+  // Fetch once per mount (the panel is re-mounted on every modal open).
+  // Intentionally not keyed on `t`: a locale switch mid-edit must not discard
+  // local changes.
+  useEffect(() => {
+    void api
+      .getResponseHeaderSettings()
+      .then((data) => {
+        setCfg({ mode: data.mode, whitelist: data.whitelist, blacklist: data.blacklist })
+        setPresets(data.presets)
+      })
+      .catch(() => setError(t("loadingFailed")))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  if (!cfg) {
+    return <p style={{ color: "var(--text-muted)", fontSize: 13 }}>{error || t("loading")}</p>
+  }
+
+  const list = cfg.mode === "blacklist" ? cfg.blacklist : cfg.whitelist
+  const setList = (next: string[]) =>
+    setCfg(cfg.mode === "blacklist" ? { ...cfg, blacklist: next } : { ...cfg, whitelist: next })
+
+  const addHeader = () => {
+    const name = input.trim()
+    if (!name || /\s/.test(name)) {
+      setInputError(t("headerNameInvalid"))
+      return
+    }
+    if (list.some((h) => h.toLowerCase() === name.toLowerCase())) {
+      setInputError(t("headerAlreadyAdded"))
+      return
+    }
+    setInputError("")
+    setList([...list, name])
+    setInput("")
+  }
+
+  const removeHeader = (name: string) => setList(list.filter((h) => h !== name))
+
+  const save = async () => {
+    setSaving(true)
+    try {
+      await api.updateResponseHeaderSettings(cfg)
+      onClose()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const modeLabel = (m: HeaderForwardMode) =>
+    m === "passthrough" ? t("modePassthrough") : m === "whitelist" ? t("modeWhitelist") : t("modeBlacklist")
+  const modeDesc = (m: HeaderForwardMode) =>
+    m === "passthrough" ? t("modePassthroughDesc") : m === "whitelist" ? t("modeWhitelistDesc") : t("modeBlacklistDesc")
+  const groupLabels: Record<string, string> = {
+    anthropic: t("presetAnthropic"),
+    openai: t("presetOpenAI"),
+    common: t("presetCommon"),
+  }
+
+  return (
+    <>
+      <div className="mode-row">
+        {(["passthrough", "whitelist", "blacklist"] as HeaderForwardMode[]).map((m) => (
+          <button key={m} className={`mode-option${cfg.mode === m ? " active" : ""}`} onClick={() => setCfg({ ...cfg, mode: m })}>
+            {modeLabel(m)}
+          </button>
+        ))}
+      </div>
+      <div className="mode-desc">{modeDesc(cfg.mode)}</div>
+
+      {cfg.mode !== "passthrough" && (
+        <>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+            {cfg.mode === "blacklist" ? t("excludedHeaders") : t("selectedHeaders")}
+          </div>
+          {list.length > 0 && (
+            <div className="chip-row">
+              {list.map((h) => (
+                <span key={h} className="chip">
+                  {h}
+                  <button className="chip-remove" onClick={() => removeHeader(h)} aria-label={`remove ${h}`}>×</button>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="add-row">
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => { setInput(e.target.value); setInputError("") }}
+              onKeyDown={(e) => { if (e.key === "Enter") addHeader() }}
+              placeholder={t("addHeaderPlaceholder")}
+              style={{ fontSize: 13, padding: "4px 8px", fontFamily: "monospace" }}
+            />
+            <button className="primary" onClick={addHeader} style={{ padding: "4px 12px", fontSize: 12, flexShrink: 0 }}>
+              {t("addHeader")}
+            </button>
+          </div>
+          {inputError && <p style={{ color: "var(--red)", fontSize: 12, marginBottom: 8 }}>{inputError}</p>}
+
+          {presets.map((preset) => (
+            <div key={preset.group}>
+              <div className="chip-group-label">{groupLabels[preset.group] ?? preset.group}</div>
+              <div className="chip-row">
+                {preset.headers.map((h) => {
+                  const added = list.some((x) => x.toLowerCase() === h.toLowerCase())
+                  return (
+                    <button
+                      key={h}
+                      className={`chip${added ? " chip-dim" : ""}`}
+                      onClick={added ? undefined : () => { setInputError(""); setList([...list, h]) }}
+                    >
+                      {h}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+
+      <p className="hint">{t("headerForwardingHint")}</p>
+
+      {error && <p style={{ color: "var(--red)", fontSize: 12, marginBottom: 8 }}>{error}</p>}
+
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <button onClick={onClose}>{t("cancel")}</button>
+        <button className="primary" onClick={() => void save()} disabled={saving}>{saving ? t("saving") : t("save")}</button>
+      </div>
+    </>
   )
 }
 
@@ -483,7 +675,7 @@ function ProxyUsagePanel({ accounts }: { accounts: Array<Account> }) {
   )
 }
 
-function ClaudeCodePanel({ accounts, proxyPort, pool }: { accounts: Array<Account>; proxyPort: number; pool: PoolConfig }) {
+function ClaudeCodePanel({ accounts, pool }: { accounts: Array<Account>; proxyPort: number; pool: PoolConfig }) {
   const [open, setOpen] = useState(false)
   const [model, setModel] = useState("claude-sonnet-4")
   const [smallModel, setSmallModel] = useState("claude-sonnet-4")
@@ -864,6 +1056,7 @@ function ModelMappingPanel() {
 function Dashboard() {
   const [accounts, setAccounts] = useState<Array<Account>>([])
   const [showForm, setShowForm] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const [loading, setLoading] = useState(true)
   const [proxyPort, setProxyPort] = useState(4141)
   const [pool, setPool] = useState<PoolConfig>({ enabled: false, strategy: "round-robin" } as PoolConfig)
@@ -896,11 +1089,23 @@ function Dashboard() {
           <p style={{ color: "var(--text-muted)", fontSize: 14 }}>{t("dashboardSubtitle")}</p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
+          <button
+            onClick={() => setShowSettings(true)}
+            aria-label={t("settings")}
+            title={t("settings")}
+            style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", padding: "4px 8px" }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
           <LanguageSwitcher />
           <button className="primary" onClick={() => setShowForm(!showForm)}>{showForm ? t("cancel") : t("addAccount")}</button>
           <button onClick={handleLogout}>{t("logout")}</button>
         </div>
       </header>
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       <ProxySettingsPanel settings={proxySettings} onChange={setProxySettings} />
       <PoolSettings pool={pool} proxyPort={proxyPort} onChange={setPool} />
       <BatchUsagePanel />

@@ -104,6 +104,24 @@ export interface ProxySettings {
   proxyURL: string
 }
 
+// Response header forwarding settings
+export type HeaderForwardMode = "passthrough" | "whitelist" | "blacklist"
+
+export interface ResponseHeaderSettings {
+  mode: HeaderForwardMode
+  whitelist: string[]
+  blacklist: string[]
+}
+
+export interface HeaderPreset {
+  group: string
+  headers: string[]
+}
+
+export interface ResponseHeaderSettingsResponse extends ResponseHeaderSettings {
+  presets: HeaderPreset[]
+}
+
 export interface CopilotModel {
   id: string
   ownedBy: string
@@ -231,6 +249,16 @@ export const api = {
 
   updateProxySettings: (data: ProxySettings) =>
     request<ProxySettings>("/proxy-config", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  // Response header forwarding settings
+  getResponseHeaderSettings: () =>
+    request<ResponseHeaderSettingsResponse>("/settings/response-headers"),
+
+  updateResponseHeaderSettings: (data: ResponseHeaderSettings) =>
+    request<ResponseHeaderSettings>("/settings/response-headers", {
       method: "PUT",
       body: JSON.stringify(data),
     }),
