@@ -20,6 +20,15 @@ func TranslateToAnthropic(resp ChatCompletionResponse) AnthropicResponse {
 			stopReason = MapOpenAIStopReasonToAnthropic(*choice.FinishReason)
 		}
 
+		// Reasoning models return their thinking separately (reasoning_content);
+		// surface it as a thinking block placed before the text blocks.
+		if msg.ReasoningContent != "" {
+			content = append(content, AnthropicContentBlock{
+				Type:     "thinking",
+				Thinking: msg.ReasoningContent,
+			})
+		}
+
 		if msg.Content != "" {
 			content = append(content, AnthropicContentBlock{
 				Type: "text",

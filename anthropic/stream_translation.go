@@ -85,10 +85,44 @@ func TranslateChunkToAnthropicEvents(chunk ChatCompletionResponse, state *Anthro
 			continue
 		}
 
+		// Handle reasoning content (reasoning models stream their thinking
+		// separately) — emit it as a thinking content block.
+		if delta.ReasoningContent != "" {
+			if !state.ContentBlockOpen || !state.OpenBlockIsThinking {
+				// No block open, or a text/tool block is open — start a new
+				// thinking block.
+				events = append(events, closeContentBlock(state)...)
+				events = append(events, StreamEvent{
+					Event: "content_block_start",
+					Data: ContentBlockStartEvent{
+						Type:  "content_block_start",
+						Index: state.ContentBlockIndex,
+						ContentBlock: AnthropicContentBlock{
+							Type: "thinking",
+						},
+					},
+				})
+				state.ContentBlockOpen = true
+				state.OpenBlockIsTool = false
+				state.OpenBlockIsThinking = true
+			}
+			events = append(events, StreamEvent{
+				Event: "content_block_delta",
+				Data: ContentBlockDeltaEvent{
+					Type:  "content_block_delta",
+					Index: state.ContentBlockIndex,
+					Delta: DeltaBlock{
+						Type:         "thinking_delta",
+						ThinkingText: delta.ReasoningContent,
+					},
+				},
+			})
+		}
+
 		// Handle text content
 		if delta.Content != "" {
-			if !state.ContentBlockOpen || state.OpenBlockIsTool {
-				// No block open, or a tool_use block is open — start a new text block.
+			if !state.ContentBlockOpen || state.OpenBlockIsTool || state.OpenBlockIsThinking {
+				// No block open, or a tool_use/thinking block is open — start a new text block.
 				events = append(events, closeContentBlock(state)...)
 				events = append(events, StreamEvent{
 					Event: "content_block_start",
@@ -103,6 +137,7 @@ func TranslateChunkToAnthropicEvents(chunk ChatCompletionResponse, state *Anthro
 				})
 				state.ContentBlockOpen = true
 				state.OpenBlockIsTool = false
+				state.OpenBlockIsThinking = false
 			}
 			events = append(events, StreamEvent{
 				Event: "content_block_delta",
@@ -146,6 +181,7 @@ func TranslateChunkToAnthropicEvents(chunk ChatCompletionResponse, state *Anthro
 					})
 					state.ContentBlockOpen = true
 					state.OpenBlockIsTool = true
+					state.OpenBlockIsThinking = false
 				}
 
 				if tc.Function.Arguments != "" {

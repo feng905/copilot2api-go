@@ -2,6 +2,7 @@ package instance
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -138,27 +139,46 @@ func ForwardEmbeddingsResponse(c *gin.Context, resp *http.Response) {
 // The returned bool is true when the response is already in Anthropic format
 // (direct proxy) and false when it is in OpenAI format (needs translation).
 func DoMessagesProxy(c *gin.Context, state *config.State, bodyBytes []byte) (*http.Response, bool, error) {
-	var anthropicPayload anthropic.AnthropicMessagesPayload
-	if err := json.Unmarshal(bodyBytes, &anthropicPayload); err != nil {
+	// Routing decisions read a generic map instead of the typed
+	// AnthropicMessagesPayload: the direct /v1/messages path must forward the
+	// client's fields verbatim, and a struct round-trip silently drops every
+	// field not declared on the struct (thinking was lost exactly this way,
+	// and any future Anthropic parameter would be too). Only model and
+	// max_tokens are ever edited; everything else passes through untouched.
+	var raw map[string]interface{}
+	dec := json.NewDecoder(bytes.NewReader(bodyBytes))
+	dec.UseNumber()
+	if err := dec.Decode(&raw); err != nil {
 		return nil, false, fmt.Errorf("invalid request: %v", err)
 	}
 
-	copilotModelID := anthropic.NormalizeAnthropicModel(store.ToCopilotID(anthropicPayload.Model))
+	model, _ := raw["model"].(string)
+	copilotModelID := anthropic.NormalizeAnthropicModel(store.ToCopilotID(model))
 
-	// Auto-fill max_tokens from model capabilities if not provided.
-	if anthropicPayload.MaxTokens == 0 {
-		if limit := lookupMaxOutputTokens(state, copilotModelID); limit > 0 {
-			anthropicPayload.MaxTokens = limit
-		}
+	// max_tokens is auto-filled from model capabilities only when the client
+	// omitted it (or sent 0); the fill is applied to whichever path runs.
+	maxTokensMissing := maxTokensUnset(raw["max_tokens"])
+	fillLimit := 0
+	if maxTokensMissing {
+		fillLimit = lookupMaxOutputTokens(state, copilotModelID)
 	}
 
-	// Prefer /v1/messages when the model supports it — proxy the Anthropic
-	// payload directly so the request body is never modified.
+	// Prefer /v1/messages when the model supports it. The original bytes go
+	// out untouched unless the model rename or max_tokens fill is required.
 	if supportsEndpoint(state, copilotModelID, "/v1/messages") {
-		anthropicPayload.Model = copilotModelID
-		directBytes, err := json.Marshal(anthropicPayload)
-		if err != nil {
-			return nil, false, fmt.Errorf("failed to marshal request: %v", err)
+		directBytes := bodyBytes
+		if model != copilotModelID || (maxTokensMissing && fillLimit > 0) {
+			if model != copilotModelID {
+				raw["model"] = copilotModelID
+			}
+			if maxTokensMissing && fillLimit > 0 {
+				raw["max_tokens"] = fillLimit
+			}
+			edited, err := json.Marshal(raw)
+			if err != nil {
+				return nil, false, fmt.Errorf("failed to marshal request: %v", err)
+			}
+			directBytes = edited
 		}
 		// Forward Anthropic-specific headers the client may have sent.
 		extraHeaders := make(http.Header)
@@ -173,6 +193,13 @@ func DoMessagesProxy(c *gin.Context, state *config.State, bodyBytes []byte) (*ht
 	}
 
 	// Fallback: translate Anthropic → OpenAI and route through /chat/completions.
+	var anthropicPayload anthropic.AnthropicMessagesPayload
+	if err := json.Unmarshal(bodyBytes, &anthropicPayload); err != nil {
+		return nil, false, fmt.Errorf("invalid request: %v", err)
+	}
+	if maxTokensMissing && fillLimit > 0 {
+		anthropicPayload.MaxTokens = fillLimit
+	}
 	openaiPayload := anthropic.TranslateToOpenAI(anthropicPayload)
 	openaiBytes, err := json.Marshal(openaiPayload)
 	if err != nil {
@@ -180,6 +207,17 @@ func DoMessagesProxy(c *gin.Context, state *config.State, bodyBytes []byte) (*ht
 	}
 	resp, err := RestDoCompletions(c.Request.Context(), state, openaiBytes)
 	return resp, false, err
+}
+
+// maxTokensUnset reports whether the raw max_tokens field is absent or zero.
+func maxTokensUnset(v interface{}) bool {
+	if v == nil {
+		return true
+	}
+	if n, ok := v.(json.Number); ok {
+		return n.String() == "" || n.String() == "0"
+	}
+	return false
 }
 
 // ForwardMessagesResponse writes the upstream response to the client in Anthropic format.

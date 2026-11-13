@@ -71,7 +71,29 @@ func TranslateToOpenAI(payload AnthropicMessagesPayload) ChatCompletionsPayload 
 		result.ToolChoice = convertToolChoice(payload.ToolChoice)
 	}
 
+	// Map Anthropic extended thinking to the OpenAI reasoning_effort parameter
+	// so the fallback /chat/completions path still enables reasoning.
+	if payload.Thinking.IsEnabled() {
+		result.ReasoningEffort = ReasoningEffortFromBudget(payload.Thinking.BudgetTokens)
+	}
+
 	return result
+}
+
+// ReasoningEffortFromBudget maps an Anthropic thinking budget to an OpenAI
+// reasoning_effort level. budget_tokens spans roughly 1k-64k; the tiers are
+// spaced so Claude Code's typical budgets (4k-10k) land on medium.
+func ReasoningEffortFromBudget(budget int) string {
+	switch {
+	case budget <= 0:
+		return "low"
+	case budget <= 4096:
+		return "low"
+	case budget <= 16000:
+		return "medium"
+	default:
+		return "high"
+	}
 }
 
 // NormalizeAnthropicModel normalizes Anthropic model names by stripping date suffixes.

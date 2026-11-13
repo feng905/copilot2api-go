@@ -14,7 +14,22 @@ type AnthropicMessagesPayload struct {
 	StopSequences []string           `json:"stop_sequences,omitempty"`
 	Tools         []AnthropicTool    `json:"tools,omitempty"`
 	ToolChoice    interface{}        `json:"tool_choice,omitempty"` // string or ToolChoiceObj
+	Thinking      *ThinkingConfig    `json:"thinking,omitempty"`
 	Metadata      *Metadata          `json:"metadata,omitempty"`
+}
+
+// ThinkingConfig is the Anthropic extended-thinking request parameter
+// ({"type":"enabled","budget_tokens":N}). It is passed through verbatim on the
+// direct /v1/messages proxy path and mapped to reasoning_effort on the OpenAI
+// translation path.
+type ThinkingConfig struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
+}
+
+// IsEnabled reports whether extended thinking was requested.
+func (t *ThinkingConfig) IsEnabled() bool {
+	return t != nil && t.Type == "enabled"
 }
 
 type AnthropicMessage struct {
@@ -85,11 +100,12 @@ type AnthropicResponse struct {
 }
 
 type AnthropicContentBlock struct {
-	Type  string      `json:"type"`
-	Text  string      `json:"text,omitempty"`
-	ID    string      `json:"id,omitempty"`
-	Name  string      `json:"name,omitempty"`
-	Input interface{} `json:"input,omitempty"`
+	Type     string      `json:"type"`
+	Text     string      `json:"text,omitempty"`
+	Thinking string      `json:"thinking,omitempty"`
+	ID       string      `json:"id,omitempty"`
+	Name     string      `json:"name,omitempty"`
+	Input    interface{} `json:"input,omitempty"`
 }
 
 type AnthropicUsage struct {
@@ -126,6 +142,7 @@ type ContentBlockDeltaEvent struct {
 type DeltaBlock struct {
 	Type         string          `json:"type"`
 	Text         string          `json:"text,omitempty"`
+	ThinkingText string          `json:"thinking,omitempty"`
 	PartialJSON  string          `json:"partial_json,omitempty"`
 	StopReason   string          `json:"stop_reason,omitempty"`
 	StopSequence *string         `json:"stop_sequence,omitempty"`
@@ -183,6 +200,7 @@ type ChatCompletionsPayload struct {
 	Stop                interface{}     `json:"stop,omitempty"`
 	Tools               []OpenAITool    `json:"tools,omitempty"`
 	ToolChoice          interface{}     `json:"tool_choice,omitempty"`
+	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
 	N                   int             `json:"n,omitempty"`
 	User                string          `json:"user,omitempty"`
 }
@@ -253,9 +271,10 @@ type Choice struct {
 }
 
 type ChoiceMsg struct {
-	Role      string     `json:"role,omitempty"`
-	Content   string     `json:"content,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Role             string     `json:"role,omitempty"`
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type OpenAIUsage struct {
@@ -281,6 +300,7 @@ type AnthropicStreamState struct {
 	ContentBlockIndex    int
 	ContentBlockOpen     bool
 	OpenBlockIsTool      bool
+	OpenBlockIsThinking  bool
 	ToolCalls            map[int]*ToolCallState
 	InputTokens          int
 	OutputTokens         int
